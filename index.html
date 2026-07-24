@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lector Flipbook PDF con Zoom y Subrayador</title>
+  
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: #1a1a1a;
+      color: #fff;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Barra de herramientas */
+    .controls {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 60px;
+      background-color: #2b2b2b;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.5);
+      z-index: 100;
+      padding: 0 10px;
+      flex-wrap: wrap;
+    }
+
+    .controls button {
+      background-color: #444;
+      color: #fff;
+      border: 1px solid #555;
+      padding: 8px 14px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: bold;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .controls button:hover {
+      background-color: #666;
+    }
+
+    .controls button.active {
+      background-color: #ffd700;
+      color: #000;
+      border-color: #cca300;
+    }
+
+    .separator {
+      width: 1px;
+      height: 25px;
+      background-color: #555;
+      margin: 0 5px;
+    }
+
+    .page-info, .zoom-info {
+      font-size: 14px;
+      color: #ccc;
+    }
+
+    /* Area de visualización con soporte para Desplazamiento/Scroll al hacer Zoom */
+    .flipbook-viewport {
+      margin-top: 60px;
+      width: 100vw;
+      height: calc(100vh - 60px);
+      overflow: auto; /* Permite scroll si la hoja agrandada sobrepasa la pantalla */
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+
+    /* Wrapper que aplica la escala del Zoom */
+    .zoom-wrapper {
+      transform-origin: center center;
+      transition: transform 0.2s ease-out;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+
+    #flipbook {
+      box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+      display: none;
+    }
+
+    .page {
+      position: relative;
+      background-color: #fff;
+    }
+
+    .page canvas.pdf-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .page canvas.draw-canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 10;
+      cursor: default;
+    }
+
+    .page canvas.draw-canvas.drawing-mode {
+      cursor: crosshair;
+    }
+
+    #loading {
+      font-size: 18px;
+      color: #aaa;
+    }
+  </style>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/page-flip@2.0.7/dist/js/page-flip.browser.js"></script>
+</head>
+<body>
+
+  <!-- Barra de Herramientas Estilo Acrobat -->
+  <div class="controls">
+    <!-- Navegación -->
+    <button id="prev-btn">◀ Anterior</button>
+    <span class="page-info">Pág. <span id="page-num">1</span> / <span id="page-count">-</span></span>
+    <button id="next-btn">Siguiente ▶</button>
+    
+    <div class="separator"></div>
+
+    <!-- Herramientas de Zoom / Lupa -->
+    <button id="zoom-out-btn" title="Alejar">🔍-</button>
+    <span class="zoom-info" id="zoom-percentage">100%</span>
+    <button id="zoom-in-btn" title="Acercar">🔍+</button>
+    <button id="zoom-reset-btn" title="Restablecer tamaño">🔍 100%</button>
+
+    <div class="separator"></div>
+
+    <!-- Herramienta de Subrayado -->
+    <button id="highlight-btn">🖍️ Subrayador</button>
+    <button id="clear-btn" title="Limpiar trazos">🗑️</button>
+  </div>
+
+  <!-- Visor del Libro -->
+  <div class="flipbook-viewport" id="viewport">
+    <div id="loading">Cargando PDF...</div>
+    <div class="zoom-wrapper" id="zoom-wrapper">
+      <div id="flipbook"></div>
+    </div>
+  </div>
+
+  <script>
+    const pdfUrl = 'mi_libro.pdf'; // Ruta de tu archivo PDF
+
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+    let pageFlip = null;
+    let isHighlightMode = false;
+    let currentScale = 1.0; // Control de escala de Zoom
+    const SCALE_STEP = 0.15;
+    const MIN_SCALE = 0.4;
+    const MAX_SCALE = 2.5;
+
+    async function initFlipbook() {
+      try {
+        const pdfDoc = await pdfjsLib.getDocument(pdfUrl).promise;
+        const totalPages = pdfDoc.numPages;
+        document.getElementById('page-count').textContent = totalPages;
+
+        const flipbookContainer = document.getElementById('flipbook');
+
+        for (let num = 1; num <= totalPages; num++) {
+          const page = await pdfDoc.getPage(num);
+          const viewport = page.getViewport({ scale: 1.5 });
+
+          const pageDiv = document.createElement('div');
+          pageDiv.className = 'page';
+
+          // Canvas PDF
+          const pdfCanvas = document.createElement('canvas');
+          pdfCanvas.className = 'pdf-canvas';
+          pdfCanvas.height = viewport.height;
+          pdfCanvas.width = viewport.width;
+
+          const context = pdfCanvas.getContext('2d');
+          await page.render({ canvasContext: context, viewport: viewport }).promise;
+
+          // Canvas Subrayador
+          const drawCanvas = document.createElement('canvas');
+          drawCanvas.className = 'draw-canvas';
+          drawCanvas.height = viewport.height;
+          drawCanvas.width = viewport.width;
+
+          enableHighlighting(drawCanvas);
+
+          pageDiv.appendChild(pdfCanvas);
+          pageDiv.appendChild(drawCanvas);
+          flipbookContainer.appendChild(pageDiv);
+        }
+
+        document.getElementById('loading').style.display = 'none';
+        flipbookContainer.style.display = 'block';
+
+        // Inicializar Flipbook
+        pageFlip = new St.PageFlip(flipbookContainer, {
+          width: 550,
+          height: 733,
+          size: "fixed",
+          minWidth: 300,
+          maxWidth: 1000,
+          minHeight: 400,
+          maxHeight: 1200,
+          maxShadowOpacity: 0.5,
+          showCover: true,
+          useMouseEvents: true
+        });
+
+        pageFlip.loadFromHTML(document.querySelectorAll('.page'));
+
+        pageFlip.on('flip', (e) => {
+          document.getElementById('page-num').textContent = e.data + 1;
+        });
+
+      } catch (error) {
+        console.error('Error:', error);
+        document.getElementById('loading').textContent = 'Error al cargar el archivo PDF.';
+      }
+    }
+
+    // --- Control de Zoom (Lupa) ---
+    const zoomWrapper = document.getElementById('zoom-wrapper');
+    const zoomPercentage = document.getElementById('zoom-percentage');
+
+    function updateZoom(newScale) {
+      currentScale = Math.min(Math.max(newScale, MIN_SCALE), MAX_SCALE);
+      zoomWrapper.style.transform = `scale(${currentScale})`;
+      zoomPercentage.textContent = `${Math.round(currentScale * 100)}%`;
+    }
+
+    document.getElementById('zoom-in-btn').addEventListener('click', () => {
+      updateZoom(currentScale + SCALE_STEP);
+    });
+
+    document.getElementById('zoom-out-btn').addEventListener('click', () => {
+      updateZoom(currentScale - SCALE_STEP);
+    });
+
+    document.getElementById('zoom-reset-btn').addEventListener('click', () => {
+      updateZoom(1.0);
+    });
+
+    // Zoom con la rueda del ratón manteniendo presionada la tecla Ctrl (Opcional)
+    document.getElementById('viewport').addEventListener('wheel', (e) => {
+      if (e.ctrlKey) {
+        e.preventDefault();
+        if (e.deltaY < 0) {
+          updateZoom(currentScale + 0.1);
+        } else {
+          updateZoom(currentScale - 0.1);
+        }
+      }
+    }, { passive: false });
+
+    // --- Subrayador ---
+    function enableHighlighting(canvas) {
+      const ctx = canvas.getContext('2d');
+      let isDrawing = false;
+
+      function getPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        return {
+          x: ((e.clientX || e.touches[0].clientX) - rect.left) * scaleX,
+          y: ((e.clientY || e.touches[0].clientY) - rect.top) * scaleY
+        };
+      }
+
+      function startDrawing(e) {
+        if (!isHighlightMode) return;
+        isDrawing = true;
+        const pos = getPos(e);
+        ctx.beginPath();
+        ctx.moveTo(pos.x, pos.y);
+      }
+
+      function draw(e) {
+        if (!isDrawing || !isHighlightMode) return;
+        e.preventDefault();
+        const pos = getPos(e);
+
+        ctx.strokeStyle = 'rgba(255, 235, 59, 0.45)';
+        ctx.lineWidth = 26;
+        ctx.lineCap = 'square';
+        ctx.lineJoin = 'round';
+
+        ctx.lineTo(pos.x, pos.y);
+        ctx.stroke();
+      }
+
+      function stopDrawing() {
+        isDrawing = false;
+      }
+
+      canvas.addEventListener('mousedown', startDrawing);
+      canvas.addEventListener('mousemove', draw);
+      canvas.addEventListener('mouseup', stopDrawing);
+      canvas.addEventListener('mouseleave', stopDrawing);
+
+      canvas.addEventListener('touchstart', startDrawing);
+      canvas.addEventListener('touchmove', draw);
+      canvas.addEventListener('touchend', stopDrawing);
+    }
+
+    // Toggle Subrayador
+    const highlightBtn = document.getElementById('highlight-btn');
+    highlightBtn.addEventListener('click', () => {
+      isHighlightMode = !isHighlightMode;
+      const canvases = document.querySelectorAll('.draw-canvas');
+
+      if (isHighlightMode) {
+        highlightBtn.classList.add('active');
+        canvases.forEach(c => c.classList.add('drawing-mode'));
+        pageFlip.updateFromSettings({ useMouseEvents: false });
+      } else {
+        highlightBtn.classList.remove('active');
+        canvases.forEach(c => c.classList.remove('drawing-mode'));
+        pageFlip.updateFromSettings({ useMouseEvents: true });
+      }
+    });
+
+    // Limpiar
+    document.getElementById('clear-btn').addEventListener('click', () => {
+      document.querySelectorAll('.draw-canvas').forEach(canvas => {
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      });
+    });
+
+    // Navegación
+    document.getElementById('prev-btn').addEventListener('click', () => pageFlip && pageFlip.flipPrev());
+    document.getElementById('next-btn').addEventListener('click', () => pageFlip && pageFlip.flipNext());
+
+    initFlipbook();
+  </script>
+</body>
+</html>
